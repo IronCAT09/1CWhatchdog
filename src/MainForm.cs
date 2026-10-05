@@ -37,6 +37,7 @@ namespace OneCWhatchdog
         readonly Button elevateButton = new Button();
         readonly Button defenderButton = new Button();
         bool defenderExcluded;
+        readonly CheckBox notificationsBox = new CheckBox();
         readonly ListBox logBox = new ListBox();
         readonly SplitContainer split = new SplitContainer();
         readonly ToolStripStatusLabel statusLabel = new ToolStripStatusLabel();
@@ -130,6 +131,20 @@ namespace OneCWhatchdog
             elevateButton.AutoSize = true;
             elevateButton.Click += delegate { OpenElevatedSettings(); };
             top.Controls.Add(canEdit ? (Control)autostartBox : elevateButton);
+
+            notificationsBox.Text = "Уведомления в трее";
+            notificationsBox.AutoSize = true;
+            notificationsBox.Margin = new Padding(16, 5, 3, 3);
+            notificationsBox.Enabled = canEdit;
+            notificationsBox.CheckedChanged += delegate
+            {
+                if (updating || !canEdit)
+                    return;
+                bool enabled = notificationsBox.Checked;
+                SaveSettings(delegate { Settings.Update(s => s.Notifications = enabled); });
+            };
+            top.Controls.Add(notificationsBox);
+
             if (canEdit)
             {
                 defenderButton.Text = "Добавить в исключения Защитника";
@@ -400,13 +415,15 @@ namespace OneCWhatchdog
 
         void LoadSettings()
         {
+            bool notifications = notificationsBox.Checked;
             try
             {
                 settingsStamp = Settings.GetStamp();
-                watched = new HashSet<string>(Settings.LoadServices(), StringComparer.OrdinalIgnoreCase);
-                timeoutSeconds = Math.Max(ServiceMonitor.MinTimeoutSeconds,
-                    Math.Min(ServiceMonitor.MaxTimeoutSeconds, Settings.LoadTimeout()));
-                appSettings = Settings.LoadAppControl();
+                var settings = Settings.Load();
+                watched = new HashSet<string>(settings.Services.Watched, StringComparer.OrdinalIgnoreCase);
+                timeoutSeconds = settings.Services.TimeoutSeconds;
+                appSettings = settings.ToAppControl();
+                notifications = settings.NotificationsEnabled;
             }
             catch (Exception)
             {
@@ -418,6 +435,7 @@ namespace OneCWhatchdog
             try
             {
                 timeoutBox.Value = timeoutSeconds;
+                notificationsBox.Checked = notifications;
                 allowPanel.SetData(appSettings.Enabled, appSettings.Block, appSettings.Allowed);
                 denyPanel.SetData(appSettings.DenyEnabled, appSettings.DenyBlock, appSettings.Denied);
             }
@@ -570,7 +588,8 @@ namespace OneCWhatchdog
                 watched.Add(name);
             else
                 watched.Remove(name);
-            SaveSettings(delegate { Settings.SaveServices(watched); });
+            var watchedNow = watched.ToList();
+            SaveSettings(delegate { Settings.Update(s => s.Services.Watched = watchedNow); });
 
             // Перерисовку откладываем: внутри обработчика уведомления ListView перебирать Items небезопасно.
             BeginInvoke(new Action(delegate
@@ -588,7 +607,7 @@ namespace OneCWhatchdog
                 return;
 
             timeoutSeconds = seconds;
-            SaveSettings(delegate { Settings.SaveTimeout(seconds); });
+            SaveSettings(delegate { Settings.Update(s => s.Services.TimeoutSeconds = seconds); });
             UpdateStatusBar();
         }
 
@@ -621,7 +640,7 @@ namespace OneCWhatchdog
                 Denied = denyPanel.Names
             };
             var snapshot = appSettings;
-            SaveSettings(delegate { Settings.SaveAppControl(snapshot); });
+            SaveSettings(delegate { Settings.Update(s => s.SetAppControl(snapshot)); });
             UpdateStatusBar();
         }
 

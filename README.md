@@ -83,20 +83,47 @@
 
 **Обновление с ServiceWatchdog 1.x:** при включении автозапуска старые задания
 «ServiceWatchdog …» останавливаются и удаляются, список служб и таймаут переносятся
-из `C:\ProgramData\ServiceWatchdog`. Папку `C:\Program Files\ServiceWatchdog` можно удалить вручную.
+из `C:\ProgramData\ServiceWatchdog` в `settings.json`. Папку `C:\Program Files\ServiceWatchdog` можно удалить вручную.
 
 ## Файлы
 
 Всё хранится в `C:\ProgramData\1CWhatchdog\` (запись — только администраторы и SYSTEM,
 остальные пользователи — чтение):
 
-- `services.txt` — отмеченные службы;
-- `timeout.txt` — таймаут в секундах;
-- `allowed.txt` — разрешённые программы (имена exe);
-- `denied.txt` — запрещённые программы (имена exe);
-- `appcontrol.txt` — включение и режим контроля программ
-  (`enabled`, `block` — разрешённые; `deny_enabled`, `deny_block` — запрещённые; значения `0/1`);
+- `settings.json` — все настройки;
 - `watchdog.log` — журнал (при превышении 1 МБ переименовывается в `.old`).
+
+```json
+{
+  "services": {
+    "watched": [ "MSSQLSERVER", "Spooler" ],
+    "timeoutSeconds": 30
+  },
+  "allowedPrograms": {
+    "enabled": true,
+    "block": false,
+    "programs": [ "1cv8.exe", "1cv8c.exe" ]
+  },
+  "deniedPrograms": {
+    "enabled": true,
+    "block": true,
+    "programs": [ "regedit.exe" ]
+  },
+  "notifications": true
+}
+```
+
+- `services.watched` — имена отслеживаемых служб, `timeoutSeconds` — таймаут (10–3600 с);
+- `allowedPrograms` / `deniedPrograms` — `enabled` включает список, `block` — завершать
+  программы (`false` — только запись в журнал), `programs` — имена exe;
+- `notifications` — всплывающие уведомления в трее (журнал ведётся всегда).
+
+Файл можно править вручную (с правами администратора): мониторинг перечитывает его в течение
+5 секунд. Отсутствующие разделы получают значения по умолчанию. Если файл повреждён,
+мониторинг пишет об этом в журнал и работает без настроек, пока файл не исправят.
+
+Настройки версий 1.2 и ServiceWatchdog (отдельные `.txt`-файлы) автоматически переносятся
+в `settings.json` при первом запуске мониторинга или включении автозапуска.
 
 ## Сборка
 

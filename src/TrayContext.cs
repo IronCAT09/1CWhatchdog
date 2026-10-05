@@ -35,7 +35,8 @@ namespace OneCWhatchdog
             };
             tray.MouseDoubleClick += (s, e) => { if (e.Button == MouseButtons.Left) ShowForm(); };
 
-            form.Alert += (s, e) => tray.ShowBalloonTip(5000, "1CWhatchdog", e.Text, ToolTipIcon.Warning);
+            // Настройку читаем при каждом событии: её мог поменять администратор из другого сеанса.
+            form.Alert += (s, e) => ShowBalloon(e.Text);
 
             showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, Program.ShowEventName);
             showWait = ThreadPool.RegisterWaitForSingleObject(showEvent,
@@ -44,8 +45,13 @@ namespace OneCWhatchdog
             if (showWindow)
                 Post(ShowForm); // выполнится, когда запустится цикл сообщений
             else if (!MonitorHost.IsRunning())
-                tray.ShowBalloonTip(5000, "1CWhatchdog",
-                    "Мониторинг не запущен. Двойной клик по значку — подробности.", ToolTipIcon.Warning);
+                ShowBalloon("Мониторинг не запущен. Двойной клик по значку — подробности.");
+        }
+
+        void ShowBalloon(string text)
+        {
+            if (Settings.LoadNotifications())
+                tray.ShowBalloonTip(5000, "1CWhatchdog", text, ToolTipIcon.Warning);
         }
 
         void ShowForm()

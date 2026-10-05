@@ -74,7 +74,19 @@ namespace OneCWhatchdog
                 }
 
                 string stamp = Settings.GetStamp();
-                var monitor = new ServiceMonitor(Settings.LoadServices(), Settings.LoadTimeout());
+                AppSettings settings;
+                try
+                {
+                    settings = Settings.Load();
+                }
+                catch (Exception ex)
+                {
+                    // Повреждённый settings.json: работаем с пустыми настройками, пока его не исправят.
+                    Log("Не удалось прочитать настройки: " + ex.Message, true);
+                    settings = new AppSettings().Normalize();
+                }
+
+                var monitor = new ServiceMonitor(settings.Services.Watched, settings.Services.TimeoutSeconds);
                 monitor.Event += (s, e) => Log(e.Service + ": " + e.Message, e.Alert);
                 Log("Мониторинг запущен" + Edition.Suffix + ", служб: " + monitor.Count
                     + ", таймаут: " + monitor.TimeoutSeconds + " с", false);
@@ -85,7 +97,7 @@ namespace OneCWhatchdog
                 AppControl appControl = null;
                 if (Edition.AppControl)
                 {
-                    appSettings = Settings.LoadAppControl();
+                    appSettings = settings.ToAppControl();
                     appControl = new AppControl(appSettings);
                     appControl.Event += (s, e) => Log(e.Message, e.Alert);
                     Log("Контроль программ: " + Describe(appSettings), false);
@@ -100,9 +112,10 @@ namespace OneCWhatchdog
                         continue;
                     try
                     {
-                        Reload(monitor);
+                        settings = Settings.Load();
+                        Reload(monitor, settings.Services);
                         if (appControl != null)
-                            appSettings = ReloadAppControl(appControl, appSettings);
+                            appSettings = ReloadAppControl(appControl, appSettings, settings.ToAppControl());
                         stamp = current;
                     }
                     catch (Exception ex)
@@ -114,10 +127,10 @@ namespace OneCWhatchdog
             }
         }
 
-        static void Reload(ServiceMonitor monitor)
+        static void Reload(ServiceMonitor monitor, ServicesSettings settings)
         {
-            var services = Settings.LoadServices();
-            int timeout = Settings.LoadTimeout();
+            var services = settings.Watched;
+            int timeout = settings.TimeoutSeconds;
 
             var before = new HashSet<string>(monitor.GetWatched(), StringComparer.OrdinalIgnoreCase);
             var after = new HashSet<string>(services, StringComparer.OrdinalIgnoreCase);
@@ -139,9 +152,8 @@ namespace OneCWhatchdog
                 Log("Настройки обновлены — " + string.Join("; ", parts), false);
         }
 
-        static AppControlSettings ReloadAppControl(AppControl appControl, AppControlSettings before)
+        static AppControlSettings ReloadAppControl(AppControl appControl, AppControlSettings before, AppControlSettings after)
         {
-            var after = Settings.LoadAppControl();
             appControl.Apply(after);
 
             var parts = new List<string>();

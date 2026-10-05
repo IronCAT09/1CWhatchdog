@@ -22,6 +22,7 @@ exit /b 0
   /resource:assets\app.ico,OneCWhatchdog.app.ico ^
   /resource:assets\icon_about_256x256.png,OneCWhatchdog.about.png ^
   /r:System.ServiceProcess.dll /r:System.Management.dll ^
+  /r:System.Runtime.Serialization.dll /r:System.Xml.dll ^
   /r:System.Windows.Forms.dll /r:System.Drawing.dll ^
   src\*.cs
 if errorlevel 1 exit /b 1
