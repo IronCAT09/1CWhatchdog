@@ -76,14 +76,21 @@ namespace OneCWhatchdog
                 string stamp = Settings.GetStamp();
                 var monitor = new ServiceMonitor(Settings.LoadServices(), Settings.LoadTimeout());
                 monitor.Event += (s, e) => Log(e.Service + ": " + e.Message, e.Alert);
-                Log("Мониторинг запущен, служб: " + monitor.Count + ", таймаут: " + monitor.TimeoutSeconds + " с", false);
+                Log("Мониторинг запущен" + Edition.Suffix + ", служб: " + monitor.Count
+                    + ", таймаут: " + monitor.TimeoutSeconds + " с", false);
                 monitor.Start();
 
-                var appSettings = Settings.LoadAppControl();
-                var appControl = new AppControl(appSettings);
-                appControl.Event += (s, e) => Log(e.Message, e.Alert);
-                Log("Контроль программ: " + Describe(appSettings), false);
-                appControl.Start();
+                // В редакции «только службы» запуск программ не контролируется.
+                AppControlSettings appSettings = null;
+                AppControl appControl = null;
+                if (Edition.AppControl)
+                {
+                    appSettings = Settings.LoadAppControl();
+                    appControl = new AppControl(appSettings);
+                    appControl.Event += (s, e) => Log(e.Message, e.Alert);
+                    Log("Контроль программ: " + Describe(appSettings), false);
+                    appControl.Start();
+                }
 
                 while (true)
                 {
@@ -94,7 +101,8 @@ namespace OneCWhatchdog
                     try
                     {
                         Reload(monitor);
-                        appSettings = ReloadAppControl(appControl, appSettings);
+                        if (appControl != null)
+                            appSettings = ReloadAppControl(appControl, appSettings);
                         stamp = current;
                     }
                     catch (Exception ex)

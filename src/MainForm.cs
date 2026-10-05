@@ -102,8 +102,11 @@ namespace OneCWhatchdog
 
             var tabs = new TabControl { Dock = DockStyle.Fill };
             tabs.TabPages.Add(CreateServicesTab());
-            tabs.TabPages.Add(CreatePanelTab("Разрешённые программы", allowPanel));
-            tabs.TabPages.Add(CreatePanelTab("Запрещённые программы", denyPanel));
+            if (Edition.AppControl)
+            {
+                tabs.TabPages.Add(CreatePanelTab("Разрешённые программы", allowPanel));
+                tabs.TabPages.Add(CreatePanelTab("Запрещённые программы", denyPanel));
+            }
             tabs.TabPages.Add(CreateAboutTab());
 
             logBox.Dock = DockStyle.Fill;
@@ -250,7 +253,7 @@ namespace OneCWhatchdog
             info.Controls.Add(title);
             info.Controls.Add(new Label
             {
-                Text = "Версия " + version.ToString(3),
+                Text = "Версия " + version.ToString(3) + Edition.Suffix,
                 AutoSize = true,
                 ForeColor = SystemColors.GrayText,
                 Margin = new Padding(3, 0, 3, 12)
@@ -261,7 +264,10 @@ namespace OneCWhatchdog
                 MaximumSize = new Size(520, 0),
                 Margin = new Padding(3, 0, 3, 12),
                 Text = "Следит за службами Windows и перезапускает их, если служба перестала работать. "
-                     + "Контролирует запуск программ пользователями: список разрешённых и список запрещённых.\n\n"
+                     + (Edition.AppControl
+                         ? "Контролирует запуск программ пользователями: список разрешённых и список запрещённых."
+                         : "Эта редакция только следит за службами — без контроля запуска программ.")
+                     + "\n\n"
                      + "Мониторинг работает в фоне от имени SYSTEM и не зависит от того, кто вошёл в систему. "
                      + "Значок в трее показывает состояние и уведомления; менять настройки может только администратор."
             });
@@ -768,9 +774,10 @@ namespace OneCWhatchdog
 
         void UpdateStatusBar()
         {
-            statusLabel.Text = "Служб: " + watched.Count + ", таймаут " + timeoutSeconds + " с"
-                + "   •   разрешённые: " + DescribeMode(appSettings.Enabled, appSettings.Block)
-                + "   •   запрещённые: " + DescribeMode(appSettings.DenyEnabled, appSettings.DenyBlock);
+            statusLabel.Text = "Служб: " + watched.Count + ", таймаут " + timeoutSeconds + " с";
+            if (Edition.AppControl)
+                statusLabel.Text += "   •   разрешённые: " + DescribeMode(appSettings.Enabled, appSettings.Block)
+                    + "   •   запрещённые: " + DescribeMode(appSettings.DenyEnabled, appSettings.DenyBlock);
 
             bool running = MonitorHost.IsRunning();
             if (running)
