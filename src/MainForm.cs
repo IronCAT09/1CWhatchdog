@@ -168,6 +168,13 @@ namespace ServiceWatchdog
 
         public void ShowFromTray()
         {
+            // Открыто окно настроек с правами администратора — показываем его, а не второе окно.
+            if (!standalone && Program.ActivateSettingsWindow())
+            {
+                Hide();
+                return;
+            }
+
             bool wasHidden = !Visible;
             // Сначала показываем окно: ListView создаёт свой хэндл только при показе
             // и в этот момент заново генерирует ItemChecked для всех строк.
@@ -176,6 +183,18 @@ namespace ServiceWatchdog
                 WindowState = FormWindowState.Normal;
             if (wasHidden)
                 LoadData();
+            Activate();
+        }
+
+        /// <summary>Вывести окно настроек на передний план (по сигналу от значка в трее).</summary>
+        public void ActivateWindow()
+        {
+            if (WindowState == FormWindowState.Minimized)
+                WindowState = FormWindowState.Normal;
+            Show();
+            // Без этого Windows может лишь мигнуть кнопкой на панели задач.
+            TopMost = true;
+            TopMost = false;
             Activate();
         }
 
@@ -457,6 +476,11 @@ namespace ServiceWatchdog
 
         void OpenElevatedSettings()
         {
+            if (Program.ActivateSettingsWindow())
+            {
+                Hide();
+                return;
+            }
             try
             {
                 Process.Start(new ProcessStartInfo(Application.ExecutablePath, "/settings")
@@ -464,6 +488,8 @@ namespace ServiceWatchdog
                     UseShellExecute = true,
                     Verb = "runas"
                 });
+                // Окно настроек заменяет окно просмотра; само приложение остаётся в трее.
+                Hide();
             }
             catch (Win32Exception ex)
             {
