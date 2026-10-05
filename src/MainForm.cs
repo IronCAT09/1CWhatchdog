@@ -35,6 +35,8 @@ namespace OneCWhatchdog
         // Общее
         readonly CheckBox autostartBox = new CheckBox();
         readonly Button elevateButton = new Button();
+        readonly Button defenderButton = new Button();
+        bool defenderExcluded;
         readonly ListBox logBox = new ListBox();
         readonly SplitContainer split = new SplitContainer();
         readonly ToolStripStatusLabel statusLabel = new ToolStripStatusLabel();
@@ -125,6 +127,14 @@ namespace OneCWhatchdog
             elevateButton.AutoSize = true;
             elevateButton.Click += delegate { OpenElevatedSettings(); };
             top.Controls.Add(canEdit ? (Control)autostartBox : elevateButton);
+            if (canEdit)
+            {
+                defenderButton.Text = "Добавить в исключения Защитника";
+                defenderButton.AutoSize = true;
+                defenderButton.Margin = new Padding(16, 1, 3, 3);
+                defenderButton.Click += delegate { ToggleDefenderExclusion(); };
+                top.Controls.Add(defenderButton);
+            }
             if (!canEdit)
                 top.Controls.Add(new Label
                 {
@@ -378,6 +388,7 @@ namespace OneCWhatchdog
             ReloadSettingsIfChanged();
             ReloadServices();
             SyncAutostart();
+            SyncDefender();
             UpdateStatusBar();
         }
 
@@ -642,6 +653,58 @@ namespace OneCWhatchdog
                 Cursor = Cursors.Default;
                 SyncAutostart();
                 UpdateStatusBar();
+            }
+        }
+
+        void SyncDefender()
+        {
+            if (!canEdit)
+                return;
+            try
+            {
+                defenderExcluded = DefenderExclusion.IsExcluded();
+                defenderButton.Text = defenderExcluded
+                    ? "Убрать из исключений Защитника"
+                    : "Добавить в исключения Защитника";
+                defenderButton.Enabled = true;
+            }
+            catch (InvalidOperationException ex)
+            {
+                // Например, Защитник отключён сторонним антивирусом — кнопка не нужна.
+                defenderButton.Text = "Защитник Windows недоступен";
+                defenderButton.Enabled = false;
+                new ToolTip().SetToolTip(defenderButton, ex.Message);
+            }
+        }
+
+        void ToggleDefenderExclusion()
+        {
+            string path = DefenderExclusion.ExcludedPath;
+            if (!defenderExcluded && MessageBox.Show(this,
+                    "Папка " + path + " будет добавлена в исключения Защитника Windows: "
+                    + "он перестанет проверять и блокировать файлы в ней.\n\n"
+                    + "Писать в эту папку могут только администраторы, поэтому исключение безопасно.\n\n"
+                    + "Добавить?",
+                    Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                return;
+
+            Cursor = Cursors.WaitCursor;
+            try
+            {
+                if (defenderExcluded)
+                    DefenderExclusion.Remove();
+                else
+                    DefenderExclusion.Add();
+            }
+            catch (InvalidOperationException ex)
+            {
+                MessageBox.Show(this, "Не удалось изменить исключения Защитника:\n" + ex.Message, Text,
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                Cursor = Cursors.Default;
+                SyncDefender();
             }
         }
 
