@@ -5,9 +5,9 @@ using System.Windows.Forms;
 
 namespace ServiceWatchdog
 {
+    /// <summary>Значок в трее в сеансе пользователя. Сам службы не трогает — это делает фоновый мониторинг.</summary>
     sealed class TrayContext : ApplicationContext
     {
-        readonly ServiceMonitor monitor;
         readonly MainForm form;
         readonly NotifyIcon tray;
         readonly EventWaitHandle showEvent;
@@ -15,9 +15,7 @@ namespace ServiceWatchdog
 
         public TrayContext()
         {
-            monitor = new ServiceMonitor(Settings.LoadServices(), Settings.LoadTimeout());
-
-            form = new MainForm(monitor);
+            form = new MainForm(false);
             // Хэндл нужен сразу, чтобы BeginInvoke работал, пока окно скрыто.
             IntPtr handle = form.Handle;
 
@@ -36,32 +34,20 @@ namespace ServiceWatchdog
             };
             tray.MouseDoubleClick += (s, e) => { if (e.Button == MouseButtons.Left) ShowForm(); };
 
+            form.Alert += (s, e) => tray.ShowBalloonTip(5000, "Монитор служб", e.Text, ToolTipIcon.Warning);
+
             showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, Program.ShowEventName);
             showWait = ThreadPool.RegisterWaitForSingleObject(showEvent,
                 delegate { Post(ShowForm); }, null, Timeout.Infinite, false);
 
-            monitor.Event += OnMonitorEvent;
-            monitor.Start();
-
-            form.AppendLog("Программа запущена, отслеживается служб: " + monitor.Count);
-            if (monitor.Count == 0)
+            if (!MonitorHost.IsRunning())
                 tray.ShowBalloonTip(5000, "Монитор служб",
-                    "Программа работает в трее. Двойной клик по значку — выбор служб.", ToolTipIcon.Info);
+                    "Мониторинг не запущен. Двойной клик по значку — подробности.", ToolTipIcon.Warning);
         }
 
         void ShowForm()
         {
             form.ShowFromTray();
-        }
-
-        void OnMonitorEvent(object sender, MonitorEventArgs e)
-        {
-            Post(delegate
-            {
-                form.AppendLog(e.Service + ": " + e.Message);
-                if (e.Alert)
-                    tray.ShowBalloonTip(5000, "Монитор служб", e.Service + ": " + e.Message, ToolTipIcon.Warning);
-            });
         }
 
         void Post(Action action)
@@ -73,8 +59,6 @@ namespace ServiceWatchdog
 
         void ExitApp()
         {
-            monitor.Event -= OnMonitorEvent;
-            monitor.Dispose();
             showWait.Unregister(null);
             showEvent.Dispose();
 

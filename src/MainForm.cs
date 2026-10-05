@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
+using System.Diagnostics;
 using System.Drawing;
 using System.Linq;
 using System.ServiceProcess;
@@ -14,37 +16,57 @@ namespace ServiceWatchdog
         public ServiceStartMode? StartType;
     }
 
+    /// <summary>
+    /// Окно со списком служб и журналом. Без прав администратора — только просмотр
+    /// и кнопка «Изменить настройки…», которая открывает это же окно с повышением прав.
+    /// </summary>
     sealed class MainForm : Form
     {
         const int MaxLogLines = 500;
+        const int InitialLogLines = 200;
         const int StatusColumn = 2;
+        const int ErrorCancelled = 1223; // пользователь отказался в окне UAC
 
-        readonly ServiceMonitor monitor;
+        readonly bool standalone;
+        readonly bool canEdit;
         readonly TextBox filterBox = new TextBox();
         readonly CheckBox onlyWatchedBox = new CheckBox();
         readonly CheckBox autostartBox = new CheckBox();
+        readonly Button elevateButton = new Button();
         readonly NumericUpDown timeoutBox = new NumericUpDown();
         readonly Timer timeoutCommitTimer = new Timer();
         readonly ListView list = new ListView();
         readonly ListBox logBox = new ListBox();
         readonly SplitContainer split = new SplitContainer();
         readonly ToolStripStatusLabel statusLabel = new ToolStripStatusLabel();
+        readonly ToolStripStatusLabel monitorLabel = new ToolStripStatusLabel();
         readonly Timer refreshTimer = new Timer();
+        readonly Timer logTimer = new Timer();
+        readonly LogTail logTail = new LogTail(Settings.LogPath);
 
+        HashSet<string> watched = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        int timeoutSeconds = ServiceMonitor.DefaultTimeoutSeconds;
+        string settingsStamp;
         List<ServiceInfo> services = new List<ServiceInfo>();
         bool updating;
 
+        /// <summary>Новое событие журнала, о котором стоит показать уведомление.</summary>
+        public event EventHandler<LogEntry> Alert;
+
         public bool AllowClose { get; set; }
 
-        public MainForm(ServiceMonitor monitor)
+        /// <param name="standalone">true — отдельное окно настроек (/settings), закрывается крестиком.</param>
+        public MainForm(bool standalone)
         {
-            this.monitor = monitor;
+            this.standalone = standalone;
+            canEdit = Program.IsElevated;
+            AllowClose = standalone;
 
-            Text = "Монитор служб";
+            Text = canEdit ? "Монитор служб" : "Монитор служб — просмотр";
             Icon = SystemIcons.Shield;
             StartPosition = FormStartPosition.CenterScreen;
-            Size = new Size(880, 640);
-            MinimumSize = new Size(620, 420);
+            Size = new Size(960, 640);
+            MinimumSize = new Size(660, 420);
 
             var top = new FlowLayoutPanel
             {
@@ -53,7 +75,7 @@ namespace ServiceWatchdog
                 Padding = new Padding(6, 6, 6, 2)
             };
             var searchLabel = new Label { Text = "Поиск:", AutoSize = true, Margin = new Padding(3, 7, 0, 3) };
-            filterBox.Width = 220;
+            filterBox.Width = 200;
             filterBox.TextChanged += delegate { FillList(); };
 
             onlyWatchedBox.Text = "Только отмеченные";
@@ -64,22 +86,34 @@ namespace ServiceWatchdog
             var reloadButton = new Button { Text = "Обновить список", AutoSize = true };
             reloadButton.Click += delegate { ReloadServices(); };
 
-            autostartBox.Text = "Запускать при входе в Windows";
+            var timeoutLabel = new Label { Text = "Таймаут, с:", AutoSize = true, Margin = new Padding(12, 7, 0, 3) };
+            timeoutBox.Minimum = ServiceMonitor.MinTimeoutSeconds;
+            timeoutBox.Maximum = ServiceMonitor.MaxTimeoutSeconds;
+            timeoutBox.Width = 70;
+            timeoutBox.Enabled = canEdit;
+            // Сохраняем с задержкой, чтобы не писать файл на каждое нажатие стрелки.
+            timeoutCommitTimer.Interval = 800;
+            timeoutCommitTimer.Tick += delegate { CommitTimeout(); };
+            timeoutBox.ValueChanged += delegate
+            {
+                if (updating)
+                    return;
+                timeoutCommitTimer.Stop();
+                timeoutCommitTimer.Start();
+            };
+
+            autostartBox.Text = "Автозапуск для всех пользователей";
             autostartBox.AutoSize = true;
             autostartBox.Margin = new Padding(12, 5, 3, 3);
             autostartBox.CheckedChanged += OnAutostartChanged;
 
-            var timeoutLabel = new Label { Text = "Таймаут, с:", AutoSize = true, Margin = new Padding(12, 7, 0, 3) };
-            timeoutBox.Minimum = ServiceMonitor.MinTimeoutSeconds;
-            timeoutBox.Maximum = ServiceMonitor.MaxTimeoutSeconds;
-            timeoutBox.Value = monitor.TimeoutSeconds;
-            timeoutBox.Width = 70;
-            // Применяем с задержкой, чтобы не писать в журнал каждое нажатие стрелки.
-            timeoutCommitTimer.Interval = 800;
-            timeoutCommitTimer.Tick += delegate { CommitTimeout(); };
-            timeoutBox.ValueChanged += delegate { timeoutCommitTimer.Stop(); timeoutCommitTimer.Start(); };
+            elevateButton.Text = "Изменить настройки…";
+            elevateButton.AutoSize = true;
+            elevateButton.Margin = new Padding(12, 3, 3, 3);
+            elevateButton.Click += delegate { OpenElevatedSettings(); };
 
-            top.Controls.AddRange(new Control[] { searchLabel, filterBox, onlyWatchedBox, reloadButton, timeoutLabel, timeoutBox, autostartBox });
+            top.Controls.AddRange(new Control[] { searchLabel, filterBox, onlyWatchedBox, reloadButton, timeoutLabel, timeoutBox });
+            top.Controls.Add(canEdit ? (Control)autostartBox : elevateButton);
 
             list.Dock = DockStyle.Fill;
             list.View = View.Details;
@@ -105,7 +139,10 @@ namespace ServiceWatchdog
             split.Panel2.Controls.Add(logGroup);
 
             var status = new StatusStrip();
+            statusLabel.Spring = true;
+            statusLabel.TextAlign = ContentAlignment.MiddleLeft;
             status.Items.Add(statusLabel);
+            status.Items.Add(monitorLabel);
 
             // Порядок важен: Fill добавляется первым.
             Controls.Add(split);
@@ -113,7 +150,20 @@ namespace ServiceWatchdog
             Controls.Add(status);
 
             refreshTimer.Interval = 2000;
-            refreshTimer.Tick += delegate { RefreshStatuses(); };
+            refreshTimer.Tick += delegate
+            {
+                ReloadSettingsIfChanged();
+                RefreshStatuses();
+                UpdateStatusBar();
+            };
+
+            LoadSettings();
+            foreach (var entry in logTail.ReadInitial(InitialLogLines))
+                AddLogEntry(entry);
+            // Журнал читаем и при скрытом окне — ради уведомлений в трее.
+            logTimer.Interval = 2000;
+            logTimer.Tick += delegate { PollLog(); };
+            logTimer.Start();
         }
 
         public void ShowFromTray()
@@ -125,28 +175,21 @@ namespace ServiceWatchdog
             if (WindowState == FormWindowState.Minimized)
                 WindowState = FormWindowState.Normal;
             if (wasHidden)
-            {
-                ReloadServices();
-                SyncAutostart();
-            }
+                LoadData();
             Activate();
-        }
-
-        public void AppendLog(string message)
-        {
-            DateTime now = DateTime.Now;
-            Settings.AppendLog(now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + message);
-
-            logBox.Items.Add(now.ToString("dd.MM HH:mm:ss") + "  " + message);
-            while (logBox.Items.Count > MaxLogLines)
-                logBox.Items.RemoveAt(0);
-            logBox.TopIndex = logBox.Items.Count - 1;
         }
 
         protected override void OnLoad(EventArgs e)
         {
             base.OnLoad(e);
             split.SplitterDistance = Math.Max(100, split.Height - 180);
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            if (standalone)
+                LoadData();
         }
 
         protected override void OnVisibleChanged(EventArgs e)
@@ -158,7 +201,7 @@ namespace ServiceWatchdog
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
-            if (WindowState == FormWindowState.Minimized)
+            if (!standalone && WindowState == FormWindowState.Minimized)
                 Hide();
         }
 
@@ -170,7 +213,63 @@ namespace ServiceWatchdog
                 e.Cancel = true;
                 Hide();
             }
+            else if (timeoutCommitTimer.Enabled)
+            {
+                CommitTimeout();
+            }
             base.OnFormClosing(e);
+        }
+
+        void LoadData()
+        {
+            ReloadSettingsIfChanged();
+            ReloadServices();
+            SyncAutostart();
+            UpdateStatusBar();
+        }
+
+        void LoadSettings()
+        {
+            try
+            {
+                settingsStamp = Settings.GetStamp();
+                watched = new HashSet<string>(Settings.LoadServices(), StringComparer.OrdinalIgnoreCase);
+                timeoutSeconds = Math.Max(ServiceMonitor.MinTimeoutSeconds,
+                    Math.Min(ServiceMonitor.MaxTimeoutSeconds, Settings.LoadTimeout()));
+            }
+            catch (Exception)
+            {
+                // Файл мог быть занят в момент записи — перечитаем на следующем тике.
+                settingsStamp = null;
+            }
+
+            updating = true;
+            try { timeoutBox.Value = timeoutSeconds; }
+            finally { updating = false; }
+        }
+
+        void ReloadSettingsIfChanged()
+        {
+            if (Settings.GetStamp() == settingsStamp)
+                return;
+            LoadSettings();
+            FillList();
+        }
+
+        void SaveSettings(Action save)
+        {
+            try
+            {
+                save();
+                settingsStamp = Settings.GetStamp();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, "Не удалось сохранить настройки:\n" + ex.Message, Text,
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                LoadSettings();
+                FillList();
+            }
         }
 
         void ReloadServices()
@@ -198,7 +297,6 @@ namespace ServiceWatchdog
 
         void FillList()
         {
-            var watched = new HashSet<string>(monitor.GetWatched(), StringComparer.OrdinalIgnoreCase);
             var rows = new List<ServiceInfo>(services);
             var known = new HashSet<string>(services.Select(s => s.Name), StringComparer.OrdinalIgnoreCase);
             foreach (var name in watched)
@@ -277,19 +375,22 @@ namespace ServiceWatchdog
             if (name == null)
                 return;
             // Служебные события ListView приходят и без действия пользователя — игнорируем «без изменений».
-            if (monitor.GetWatched().Contains(name, StringComparer.OrdinalIgnoreCase) == e.Item.Checked)
+            if (watched.Contains(name) == e.Item.Checked)
                 return;
 
-            monitor.SetWatched(name, e.Item.Checked);
-            try
+            if (!canEdit)
             {
-                Settings.SaveServices(monitor.GetWatched());
+                // Только просмотр: возвращаем отметку как было.
+                BeginInvoke(new Action(FillList));
+                return;
             }
-            catch (Exception ex)
-            {
-                AppendLog("Не удалось сохранить настройки: " + ex.Message);
-            }
-            AppendLog((e.Item.Checked ? "Добавлена в мониторинг: " : "Исключена из мониторинга: ") + e.Item.Text);
+
+            if (e.Item.Checked)
+                watched.Add(name);
+            else
+                watched.Remove(name);
+            SaveSettings(delegate { Settings.SaveServices(watched); });
+
             // Перерисовку откладываем: внутри обработчика уведомления ListView перебирать Items небезопасно.
             BeginInvoke(new Action(delegate
             {
@@ -302,19 +403,11 @@ namespace ServiceWatchdog
         {
             timeoutCommitTimer.Stop();
             int seconds = (int)timeoutBox.Value;
-            if (seconds == monitor.TimeoutSeconds)
+            if (!canEdit || seconds == timeoutSeconds)
                 return;
 
-            monitor.TimeoutSeconds = seconds;
-            try
-            {
-                Settings.SaveTimeout(seconds);
-            }
-            catch (Exception ex)
-            {
-                AppendLog("Не удалось сохранить таймаут: " + ex.Message);
-            }
-            AppendLog("Таймаут изменён: " + seconds + " с");
+            timeoutSeconds = seconds;
+            SaveSettings(delegate { Settings.SaveTimeout(seconds); });
             UpdateStatusBar();
         }
 
@@ -322,34 +415,99 @@ namespace ServiceWatchdog
         {
             if (updating)
                 return;
+            Cursor = Cursors.WaitCursor;
             try
             {
                 if (autostartBox.Checked)
-                    Autostart.Enable();
+                {
+                    string exe = Autostart.Install();
+                    MessageBox.Show(this,
+                        "Программа установлена: " + exe + "\n\n"
+                        + "Мониторинг запущен и будет стартовать при загрузке Windows — "
+                        + "независимо от того, кто вошёл в систему.\n"
+                        + "Значок в трее появится при входе любого пользователя.",
+                        Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
                 else
-                    Autostart.Disable();
-                AppendLog(autostartBox.Checked ? "Автозапуск включён" : "Автозапуск отключён");
+                {
+                    Autostart.Uninstall();
+                }
             }
             catch (Exception ex)
             {
                 MessageBox.Show(this, "Не удалось изменить автозапуск:\n" + ex.Message, Text,
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                Cursor = Cursors.Default;
                 SyncAutostart();
+                UpdateStatusBar();
             }
         }
 
         void SyncAutostart()
         {
+            if (!canEdit)
+                return;
             updating = true;
             try { autostartBox.Checked = Autostart.IsEnabled(); }
             finally { updating = false; }
         }
 
+        void OpenElevatedSettings()
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo(Application.ExecutablePath, "/settings")
+                {
+                    UseShellExecute = true,
+                    Verb = "runas"
+                });
+            }
+            catch (Win32Exception ex)
+            {
+                if (ex.NativeErrorCode != ErrorCancelled)
+                    MessageBox.Show(this, "Не удалось открыть настройки:\n" + ex.Message, Text,
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        void PollLog()
+        {
+            foreach (var entry in logTail.ReadNew())
+            {
+                AddLogEntry(entry);
+                if (entry.Alert)
+                {
+                    var handler = Alert;
+                    if (handler != null)
+                        handler(this, entry);
+                }
+            }
+        }
+
+        void AddLogEntry(LogEntry entry)
+        {
+            logBox.Items.Add(entry.ToString());
+            while (logBox.Items.Count > MaxLogLines)
+                logBox.Items.RemoveAt(0);
+            logBox.TopIndex = logBox.Items.Count - 1;
+        }
+
         void UpdateStatusBar()
         {
-            statusLabel.Text = "Отслеживается служб: " + monitor.Count
-                + "   •   перезапуск, если служба не работает "
-                + monitor.TimeoutSeconds + " с";
+            statusLabel.Text = "Отслеживается служб: " + watched.Count
+                + "   •   перезапуск, если служба не работает " + timeoutSeconds + " с";
+
+            bool running = MonitorHost.IsRunning();
+            if (running)
+                monitorLabel.Text = "Мониторинг работает";
+            else if (canEdit)
+                monitorLabel.Text = "Мониторинг не запущен — включите «Автозапуск для всех пользователей»";
+            else
+                monitorLabel.Text = "Мониторинг не запущен — нужна настройка администратором";
+            monitorLabel.ForeColor = running ? Color.DarkGreen : Color.Firebrick;
         }
 
         static bool Contains(string text, string part)

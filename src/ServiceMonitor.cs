@@ -90,6 +90,16 @@ namespace ServiceWatchdog
             }
         }
 
+        public void ReplaceWatched(IEnumerable<string> services)
+        {
+            var next = new HashSet<string>(services, StringComparer.OrdinalIgnoreCase);
+            foreach (var name in GetWatched())
+                if (!next.Contains(name))
+                    SetWatched(name, false);
+            foreach (var name in next)
+                SetWatched(name, true);
+        }
+
         public void Start()
         {
             timer = new Timer(Tick, null, 0, CheckIntervalMs);

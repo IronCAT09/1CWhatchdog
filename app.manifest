@@ -4,8 +4,9 @@
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
     <security>
       <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
-        <!-- Запуск/остановка служб требует прав администратора -->
-        <requestedExecutionLevel level="requireAdministrator" uiAccess="false"/>
+        <!-- Значок в трее работает у любого пользователя. Службы запускает фоновый
+             мониторинг от имени SYSTEM, настройки меняются через запуск с /settings (UAC). -->
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
       </requestedPrivileges>
     </security>
   </trustInfo>
