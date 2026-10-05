@@ -5,7 +5,7 @@ using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Threading;
 
-namespace ServiceWatchdog
+namespace OneCWhatchdog
 {
     /// <summary>
     /// Фоновый мониторинг. Запускается заданием Планировщика от имени SYSTEM при загрузке
@@ -14,15 +14,22 @@ namespace ServiceWatchdog
     /// </summary>
     static class MonitorHost
     {
-        const string MutexName = "Global\\ServiceWatchdog_Monitor";
+        const string MutexName = "Global\\1CWhatchdog_Monitor";
+        /// <summary>Мьютекс мониторинга версий 1.1 и старше, когда программа называлась ServiceWatchdog.</summary>
+        public const string LegacyMutexName = "Global\\ServiceWatchdog_Monitor";
         const int SettingsPollMs = 5000;
 
         public static bool IsRunning()
         {
+            return IsRunning(MutexName);
+        }
+
+        public static bool IsRunning(string mutexName)
+        {
             try
             {
                 Mutex mutex;
-                if (!Mutex.TryOpenExisting(MutexName, MutexRights.Synchronize, out mutex))
+                if (!Mutex.TryOpenExisting(mutexName, MutexRights.Synchronize, out mutex))
                     return false;
                 mutex.Dispose();
                 return true;
@@ -56,14 +63,27 @@ namespace ServiceWatchdog
                     Environment.Exit(1); // задание Планировщика перезапустит мониторинг
                 };
 
-                try { Settings.EnsureDirectory(); }
-                catch (Exception ex) { Log("Не удалось настроить права на папку настроек: " + ex.Message, true); }
+                try
+                {
+                    Settings.EnsureDirectory();
+                    Settings.MigrateLegacy();
+                }
+                catch (Exception ex)
+                {
+                    Log("Не удалось подготовить папку настроек: " + ex.Message, true);
+                }
 
                 string stamp = Settings.GetStamp();
                 var monitor = new ServiceMonitor(Settings.LoadServices(), Settings.LoadTimeout());
                 monitor.Event += (s, e) => Log(e.Service + ": " + e.Message, e.Alert);
                 Log("Мониторинг запущен, служб: " + monitor.Count + ", таймаут: " + monitor.TimeoutSeconds + " с", false);
                 monitor.Start();
+
+                var appSettings = Settings.LoadAppControl();
+                var appControl = new AppControl(appSettings);
+                appControl.Event += (s, e) => Log(e.Message, e.Alert);
+                Log("Контроль программ: " + Describe(appSettings), false);
+                appControl.Start();
 
                 while (true)
                 {
@@ -74,6 +94,7 @@ namespace ServiceWatchdog
                     try
                     {
                         Reload(monitor);
+                        appSettings = ReloadAppControl(appControl, appSettings);
                         stamp = current;
                     }
                     catch (Exception ex)
@@ -108,6 +129,48 @@ namespace ServiceWatchdog
                 parts.Add("таймаут: " + monitor.TimeoutSeconds + " с");
             if (parts.Count > 0)
                 Log("Настройки обновлены — " + string.Join("; ", parts), false);
+        }
+
+        static AppControlSettings ReloadAppControl(AppControl appControl, AppControlSettings before)
+        {
+            var after = Settings.LoadAppControl();
+            appControl.Apply(after);
+
+            var parts = new List<string>();
+            if (after.Enabled != before.Enabled || after.Block != before.Block
+                || after.DenyEnabled != before.DenyEnabled || after.DenyBlock != before.DenyBlock)
+                parts.Add(Describe(after));
+            DescribeListChanges(parts, before.Allowed, after.Allowed, "разрешены", "убраны из разрешённых");
+            DescribeListChanges(parts, before.Denied, after.Denied, "запрещены", "убраны из запрещённых");
+            if (parts.Count > 0)
+                Log("Контроль программ — " + string.Join("; ", parts), false);
+            return after;
+        }
+
+        static void DescribeListChanges(List<string> parts, List<string> before, List<string> after,
+            string addedText, string removedText)
+        {
+            var oldList = new HashSet<string>(before.Select(AppControl.NormalizeName), StringComparer.OrdinalIgnoreCase);
+            var newList = new HashSet<string>(after.Select(AppControl.NormalizeName), StringComparer.OrdinalIgnoreCase);
+            var added = newList.Where(n => !oldList.Contains(n)).ToList();
+            var removed = oldList.Where(n => !newList.Contains(n)).ToList();
+            if (added.Count > 0)
+                parts.Add(addedText + ": " + string.Join(", ", added));
+            if (removed.Count > 0)
+                parts.Add(removedText + ": " + string.Join(", ", removed));
+        }
+
+        static string Describe(AppControlSettings settings)
+        {
+            return "разрешённые программы " + DescribeMode(settings.Enabled, settings.Block, settings.Allowed.Count)
+                + "; запрещённые программы " + DescribeMode(settings.DenyEnabled, settings.DenyBlock, settings.Denied.Count);
+        }
+
+        static string DescribeMode(bool enabled, bool block, int count)
+        {
+            if (!enabled)
+                return "— выключено";
+            return (block ? "— завершение" : "— только журнал") + ", в списке: " + count;
         }
 
         static void Log(string text, bool alert)

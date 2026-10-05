@@ -7,20 +7,22 @@ using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 
-namespace ServiceWatchdog
+namespace OneCWhatchdog
 {
     /// <summary>
     /// Установка автозапуска (нужны права администратора). Создаёт два задания Планировщика:
-    ///   «ServiceWatchdog Monitor» — мониторинг от имени SYSTEM при загрузке Windows;
-    ///   «ServiceWatchdog Tray»    — значок в трее при входе любого пользователя (без повышения прав).
+    ///   «1CWhatchdog Monitor» — мониторинг от имени SYSTEM при загрузке Windows;
+    ///   «1CWhatchdog Tray»    — значок в трее при входе любого пользователя (без повышения прав).
     /// Exe копируется в Program Files: оттуда его может запустить любой пользователь,
     /// и подменить файл, исполняемый от имени SYSTEM, может только администратор.
     /// </summary>
     static class Autostart
     {
-        const string MonitorTask = "ServiceWatchdog Monitor";
-        const string TrayTask = "ServiceWatchdog Tray";
-        const string LegacyTask = "ServiceWatchdog"; // автозапуск версии 1.0 — только для текущего пользователя
+        const string MonitorTask = "1CWhatchdog Monitor";
+        const string TrayTask = "1CWhatchdog Tray";
+        // Задания версий до переименования: ServiceWatchdog 1.0 (только текущий пользователь) и 1.1.
+        const string LegacyMonitorTask = "ServiceWatchdog Monitor";
+        static readonly string[] LegacyTasks = { "ServiceWatchdog", "ServiceWatchdog Monitor", "ServiceWatchdog Tray" };
         static readonly TimeSpan StopTimeout = TimeSpan.FromSeconds(15);
 
         const string SettingsXml = @"
@@ -66,12 +68,14 @@ namespace ServiceWatchdog
         public static string Install()
         {
             StopMonitor();
+            RemoveLegacy();
             string exe = DeployExecutable();
             string dir = Path.GetDirectoryName(exe);
             Settings.EnsureDirectory();
+            Settings.MigrateLegacy();
 
             Register(MonitorTask, string.Format(TaskXml,
-                "Монитор служб: перезапуск отмеченных служб Windows",
+                "1CWhatchdog: перезапуск служб и контроль запуска программ",
                 "<BootTrigger><Enabled>true</Enabled></BootTrigger>",
                 "<UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel>",
                 string.Format(SettingsXml, "IgnoreNew", 5,
@@ -80,14 +84,13 @@ namespace ServiceWatchdog
 
             // GroupId S-1-5-32-545 («Пользователи») и триггер без UserId — вход любого пользователя.
             Register(TrayTask, string.Format(TaskXml,
-                "Монитор служб: значок в трее",
+                "1CWhatchdog: значок в трее",
                 "<LogonTrigger><Enabled>true</Enabled><Delay>PT10S</Delay></LogonTrigger>",
                 "<GroupId>S-1-5-32-545</GroupId><RunLevel>LeastPrivilege</RunLevel>",
                 string.Format(SettingsXml, "Parallel", 7, ""),
-                SecurityElement.Escape(exe), "", SecurityElement.Escape(dir)));
+                SecurityElement.Escape(exe), "<Arguments>/tray</Arguments>", SecurityElement.Escape(dir)));
 
             string output;
-            Run("/Delete /TN \"" + LegacyTask + "\" /F", out output);
             Check(Run("/Run /TN \"" + MonitorTask + "\"", out output), output);
             return exe;
         }
@@ -98,7 +101,17 @@ namespace ServiceWatchdog
             string output;
             Check(Run("/Delete /TN \"" + MonitorTask + "\" /F", out output), output);
             Run("/Delete /TN \"" + TrayTask + "\" /F", out output);
-            Run("/Delete /TN \"" + LegacyTask + "\" /F", out output);
+            RemoveLegacy();
+        }
+
+        /// <summary>Останавливает и удаляет автозапуск ServiceWatchdog (прежнее название программы).</summary>
+        static void RemoveLegacy()
+        {
+            string output;
+            Run("/End /TN \"" + LegacyMonitorTask + "\"", out output);
+            WaitWhileRunning(MonitorHost.LegacyMutexName);
+            foreach (var task in LegacyTasks)
+                Run("/Delete /TN \"" + task + "\" /F", out output);
         }
 
         static void StopMonitor()
@@ -106,8 +119,14 @@ namespace ServiceWatchdog
             string output;
             Run("/End /TN \"" + MonitorTask + "\"", out output);
             // Задание с IgnoreNew не запустится повторно, пока старый процесс не завершился.
+            WaitWhileRunning(null);
+        }
+
+        static void WaitWhileRunning(string mutexName)
+        {
             var deadline = DateTime.UtcNow + StopTimeout;
-            while (MonitorHost.IsRunning() && DateTime.UtcNow < deadline)
+            while ((mutexName == null ? MonitorHost.IsRunning() : MonitorHost.IsRunning(mutexName))
+                   && DateTime.UtcNow < deadline)
                 Thread.Sleep(250);
         }
 

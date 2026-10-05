@@ -7,7 +7,7 @@ using System.Management;
 using System.ServiceProcess;
 using System.Threading;
 
-namespace ServiceWatchdog
+namespace OneCWhatchdog
 {
     sealed class MonitorEventArgs : EventArgs
     {

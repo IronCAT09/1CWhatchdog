@@ -4,10 +4,11 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.Linq;
+using System.Reflection;
 using System.ServiceProcess;
 using System.Windows.Forms;
 
-namespace ServiceWatchdog
+namespace OneCWhatchdog
 {
     sealed class ServiceInfo
     {
@@ -17,8 +18,9 @@ namespace ServiceWatchdog
     }
 
     /// <summary>
-    /// Окно со списком служб и журналом. Без прав администратора — только просмотр
-    /// и кнопка «Изменить настройки…», которая открывает это же окно с повышением прав.
+    /// Окно с вкладками «Службы» и «Разрешённые программы» и общим журналом. Без прав
+    /// администратора — только просмотр и кнопка «Изменить настройки…», которая открывает
+    /// это же окно с повышением прав.
     /// </summary>
     sealed class MainForm : Form
     {
@@ -29,13 +31,10 @@ namespace ServiceWatchdog
 
         readonly bool standalone;
         readonly bool canEdit;
-        readonly TextBox filterBox = new TextBox();
-        readonly CheckBox onlyWatchedBox = new CheckBox();
+
+        // Общее
         readonly CheckBox autostartBox = new CheckBox();
         readonly Button elevateButton = new Button();
-        readonly NumericUpDown timeoutBox = new NumericUpDown();
-        readonly Timer timeoutCommitTimer = new Timer();
-        readonly ListView list = new ListView();
         readonly ListBox logBox = new ListBox();
         readonly SplitContainer split = new SplitContainer();
         readonly ToolStripStatusLabel statusLabel = new ToolStripStatusLabel();
@@ -44,8 +43,20 @@ namespace ServiceWatchdog
         readonly Timer logTimer = new Timer();
         readonly LogTail logTail = new LogTail(Settings.LogPath);
 
+        // Вкладка «Службы»
+        readonly TextBox filterBox = new TextBox();
+        readonly CheckBox onlyWatchedBox = new CheckBox();
+        readonly NumericUpDown timeoutBox = new NumericUpDown();
+        readonly Timer timeoutCommitTimer = new Timer();
+        readonly ListView list = new ListView();
+
+        // Вкладки «Разрешённые программы» и «Запрещённые программы»
+        readonly ProgramListPanel allowPanel;
+        readonly ProgramListPanel denyPanel;
+
         HashSet<string> watched = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         int timeoutSeconds = ServiceMonitor.DefaultTimeoutSeconds;
+        AppControlSettings appSettings = new AppControlSettings();
         string settingsStamp;
         List<ServiceInfo> services = new List<ServiceInfo>();
         bool updating;
@@ -62,18 +73,99 @@ namespace ServiceWatchdog
             canEdit = Program.IsElevated;
             AllowClose = standalone;
 
-            Text = canEdit ? "Монитор служб" : "Монитор служб — просмотр";
-            Icon = SystemIcons.Shield;
+            Text = canEdit ? "1CWhatchdog" : "1CWhatchdog — просмотр";
+            Icon = AppResources.WindowIcon;
             StartPosition = FormStartPosition.CenterScreen;
-            Size = new Size(960, 640);
-            MinimumSize = new Size(660, 420);
+            Size = new Size(960, 680);
+            MinimumSize = new Size(700, 460);
 
-            var top = new FlowLayoutPanel
+            allowPanel = new ProgramListPanel(
+                "Контролировать запуск программ",
+                "Завершать программы не из списка (иначе — только запись в журнал)",
+                "Ограничение действует на всех пользователей, включая администраторов. "
+                + "Программы сравниваются по имени exe-файла. Всегда разрешены программы из папки Windows, "
+                + "Защитник Windows, WebView2 (нужен самой Windows) и сам 1CWhatchdog.",
+                canEdit, false);
+            allowPanel.ConfirmBlocking = ConfirmAllowBlocking;
+            allowPanel.Changed += delegate { SaveAppSettings(); };
+
+            denyPanel = new ProgramListPanel(
+                "Запрещать программы из списка",
+                "Завершать запрещённые программы (иначе — только запись в журнал)",
+                "Ограничение действует на всех пользователей, включая администраторов, и на программы "
+                + "из папки Windows (cmd.exe, regedit.exe…). Запрет важнее списка разрешённых. "
+                + "Программы сравниваются по имени exe-файла.",
+                canEdit, true);
+            denyPanel.Changed += delegate { SaveAppSettings(); };
+
+            var tabs = new TabControl { Dock = DockStyle.Fill };
+            tabs.TabPages.Add(CreateServicesTab());
+            tabs.TabPages.Add(CreatePanelTab("Разрешённые программы", allowPanel));
+            tabs.TabPages.Add(CreatePanelTab("Запрещённые программы", denyPanel));
+            tabs.TabPages.Add(CreateAboutTab());
+
+            logBox.Dock = DockStyle.Fill;
+            logBox.IntegralHeight = false;
+            logBox.HorizontalScrollbar = true;
+            var logGroup = new GroupBox { Text = "Журнал", Dock = DockStyle.Fill, Padding = new Padding(6) };
+            logGroup.Controls.Add(logBox);
+
+            split.Dock = DockStyle.Fill;
+            split.Orientation = Orientation.Horizontal;
+            split.FixedPanel = FixedPanel.Panel2;
+            split.Panel1.Controls.Add(tabs);
+            split.Panel2.Controls.Add(logGroup);
+
+            var top = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(6, 6, 6, 2) };
+            autostartBox.Text = "Автозапуск для всех пользователей";
+            autostartBox.AutoSize = true;
+            autostartBox.Margin = new Padding(3, 5, 3, 3);
+            autostartBox.CheckedChanged += OnAutostartChanged;
+            elevateButton.Text = "Изменить настройки…";
+            elevateButton.AutoSize = true;
+            elevateButton.Click += delegate { OpenElevatedSettings(); };
+            top.Controls.Add(canEdit ? (Control)autostartBox : elevateButton);
+            if (!canEdit)
+                top.Controls.Add(new Label
+                {
+                    Text = "Режим просмотра: менять настройки может только администратор.",
+                    AutoSize = true,
+                    Margin = new Padding(12, 8, 3, 3)
+                });
+
+            var status = new StatusStrip();
+            statusLabel.Spring = true;
+            statusLabel.TextAlign = ContentAlignment.MiddleLeft;
+            status.Items.Add(statusLabel);
+            status.Items.Add(monitorLabel);
+
+            // Порядок важен: Fill добавляется первым.
+            Controls.Add(split);
+            Controls.Add(top);
+            Controls.Add(status);
+
+            refreshTimer.Interval = 2000;
+            refreshTimer.Tick += delegate
             {
-                Dock = DockStyle.Top,
-                AutoSize = true,
-                Padding = new Padding(6, 6, 6, 2)
+                ReloadSettingsIfChanged();
+                RefreshStatuses();
+                UpdateStatusBar();
             };
+
+            LoadSettings();
+            foreach (var entry in logTail.ReadInitial(InitialLogLines))
+                AddLogEntry(entry);
+            // Журнал читаем и при скрытом окне — ради уведомлений в трее.
+            logTimer.Interval = 2000;
+            logTimer.Tick += delegate { PollLog(); };
+            logTimer.Start();
+        }
+
+        TabPage CreateServicesTab()
+        {
+            var page = new TabPage("Службы");
+
+            var top = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(3, 4, 3, 2) };
             var searchLabel = new Label { Text = "Поиск:", AutoSize = true, Margin = new Padding(3, 7, 0, 3) };
             filterBox.Width = 200;
             filterBox.TextChanged += delegate { FillList(); };
@@ -102,18 +194,7 @@ namespace ServiceWatchdog
                 timeoutCommitTimer.Start();
             };
 
-            autostartBox.Text = "Автозапуск для всех пользователей";
-            autostartBox.AutoSize = true;
-            autostartBox.Margin = new Padding(12, 5, 3, 3);
-            autostartBox.CheckedChanged += OnAutostartChanged;
-
-            elevateButton.Text = "Изменить настройки…";
-            elevateButton.AutoSize = true;
-            elevateButton.Margin = new Padding(12, 3, 3, 3);
-            elevateButton.Click += delegate { OpenElevatedSettings(); };
-
             top.Controls.AddRange(new Control[] { searchLabel, filterBox, onlyWatchedBox, reloadButton, timeoutLabel, timeoutBox });
-            top.Controls.Add(canEdit ? (Control)autostartBox : elevateButton);
 
             list.Dock = DockStyle.Fill;
             list.View = View.Details;
@@ -126,44 +207,97 @@ namespace ServiceWatchdog
             list.Columns.Add("Тип запуска", 130);
             list.ItemChecked += OnItemChecked;
 
-            logBox.Dock = DockStyle.Fill;
-            logBox.IntegralHeight = false;
-            logBox.HorizontalScrollbar = true;
-            var logGroup = new GroupBox { Text = "Журнал", Dock = DockStyle.Fill, Padding = new Padding(6) };
-            logGroup.Controls.Add(logBox);
+            page.Controls.Add(list);
+            page.Controls.Add(top);
+            return page;
+        }
 
-            split.Dock = DockStyle.Fill;
-            split.Orientation = Orientation.Horizontal;
-            split.FixedPanel = FixedPanel.Panel2;
-            split.Panel1.Controls.Add(list);
-            split.Panel2.Controls.Add(logGroup);
+        const string ProjectUrl = "https://github.com/IronCAT09/1CWhatchdog";
 
-            var status = new StatusStrip();
-            statusLabel.Spring = true;
-            statusLabel.TextAlign = ContentAlignment.MiddleLeft;
-            status.Items.Add(statusLabel);
-            status.Items.Add(monitorLabel);
+        static TabPage CreateAboutTab()
+        {
+            var page = new TabPage("О программе") { AutoScroll = true };
 
-            // Порядок важен: Fill добавляется первым.
-            Controls.Add(split);
-            Controls.Add(top);
-            Controls.Add(status);
-
-            refreshTimer.Interval = 2000;
-            refreshTimer.Tick += delegate
+            var logo = new PictureBox
             {
-                ReloadSettingsIfChanged();
-                RefreshStatuses();
-                UpdateStatusBar();
+                Image = AppResources.Logo,
+                SizeMode = PictureBoxSizeMode.Zoom,
+                Size = new Size(160, 160),
+                Margin = new Padding(16)
             };
 
-            LoadSettings();
-            foreach (var entry in logTail.ReadInitial(InitialLogLines))
-                AddLogEntry(entry);
-            // Журнал читаем и при скрытом окне — ради уведомлений в трее.
-            logTimer.Interval = 2000;
-            logTimer.Tick += delegate { PollLog(); };
-            logTimer.Start();
+            var info = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.TopDown,
+                WrapContents = false,
+                AutoSize = true,
+                Margin = new Padding(0, 16, 16, 16)
+            };
+
+            var version = Assembly.GetExecutingAssembly().GetName().Version;
+            var title = new Label { Text = "1CWhatchdog", AutoSize = true };
+            title.Font = new Font(title.Font.FontFamily, 18f, FontStyle.Bold);
+            info.Controls.Add(title);
+            info.Controls.Add(new Label
+            {
+                Text = "Версия " + version.ToString(3),
+                AutoSize = true,
+                ForeColor = SystemColors.GrayText,
+                Margin = new Padding(3, 0, 3, 12)
+            });
+            info.Controls.Add(new Label
+            {
+                AutoSize = true,
+                MaximumSize = new Size(520, 0),
+                Margin = new Padding(3, 0, 3, 12),
+                Text = "Следит за службами Windows и перезапускает их, если служба перестала работать. "
+                     + "Контролирует запуск программ пользователями: список разрешённых и список запрещённых.\n\n"
+                     + "Мониторинг работает в фоне от имени SYSTEM и не зависит от того, кто вошёл в систему. "
+                     + "Значок в трее показывает состояние и уведомления; менять настройки может только администратор."
+            });
+
+            info.Controls.Add(CreateLink("Проект на GitHub: ", ProjectUrl, ProjectUrl));
+            info.Controls.Add(CreateLink("Настройки и журнал: ", Settings.Dir, Settings.Dir));
+            info.Controls.Add(new Label
+            {
+                Text = "Программа: " + Application.ExecutablePath,
+                AutoSize = true,
+                ForeColor = SystemColors.GrayText,
+                Margin = new Padding(3, 6, 3, 3)
+            });
+
+            var layout = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true, WrapContents = false };
+            layout.Controls.Add(logo);
+            layout.Controls.Add(info);
+            page.Controls.Add(layout);
+            return page;
+        }
+
+        /// <summary>Подпись со ссылкой: открывает адрес в браузере или папку в Проводнике.</summary>
+        static Control CreateLink(string caption, string text, string target)
+        {
+            var link = new LinkLabel { Text = caption + text, AutoSize = true, Margin = new Padding(3, 3, 3, 3) };
+            link.LinkArea = new LinkArea(caption.Length, text.Length);
+            link.LinkClicked += delegate
+            {
+                try
+                {
+                    Process.Start(new ProcessStartInfo(target) { UseShellExecute = true });
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(link.FindForm(), "Не удалось открыть:\n" + target + "\n\n" + ex.Message,
+                        "1CWhatchdog", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            };
+            return link;
+        }
+
+        static TabPage CreatePanelTab(string title, Control panel)
+        {
+            var page = new TabPage(title);
+            page.Controls.Add(panel);
+            return page;
         }
 
         public void ShowFromTray()
@@ -255,6 +389,7 @@ namespace ServiceWatchdog
                 watched = new HashSet<string>(Settings.LoadServices(), StringComparer.OrdinalIgnoreCase);
                 timeoutSeconds = Math.Max(ServiceMonitor.MinTimeoutSeconds,
                     Math.Min(ServiceMonitor.MaxTimeoutSeconds, Settings.LoadTimeout()));
+                appSettings = Settings.LoadAppControl();
             }
             catch (Exception)
             {
@@ -263,8 +398,16 @@ namespace ServiceWatchdog
             }
 
             updating = true;
-            try { timeoutBox.Value = timeoutSeconds; }
-            finally { updating = false; }
+            try
+            {
+                timeoutBox.Value = timeoutSeconds;
+                allowPanel.SetData(appSettings.Enabled, appSettings.Block, appSettings.Allowed);
+                denyPanel.SetData(appSettings.DenyEnabled, appSettings.DenyBlock, appSettings.Denied);
+            }
+            finally
+            {
+                updating = false;
+            }
         }
 
         void ReloadSettingsIfChanged()
@@ -290,6 +433,8 @@ namespace ServiceWatchdog
                 FillList();
             }
         }
+
+        // ---------- Службы ----------
 
         void ReloadServices()
         {
@@ -430,6 +575,41 @@ namespace ServiceWatchdog
             UpdateStatusBar();
         }
 
+        // ---------- Разрешённые и запрещённые программы ----------
+
+        bool ConfirmAllowBlocking()
+        {
+            int count = allowPanel.Names.Count;
+            string list = count == 0
+                ? "Список разрешённых программ пуст!"
+                : "Разрешено программ: " + count + ".";
+            return MessageBox.Show(this,
+                "Все программы не из списка будут сразу завершаться у всех пользователей, включая администраторов "
+                + "(кроме программ из папки Windows).\n\n" + list + "\n\n"
+                + "Убедитесь, что в списке есть всё нужное для работы (например, 1cv8.exe, 1cv8c.exe). "
+                + "Можно сначала поработать в режиме «только запись в журнал» и посмотреть, что запускается.\n\n"
+                + "Включить завершение программ?",
+                Text, MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes;
+        }
+
+        void SaveAppSettings()
+        {
+            appSettings = new AppControlSettings
+            {
+                Enabled = allowPanel.ListEnabled,
+                Block = allowPanel.Block,
+                Allowed = allowPanel.Names,
+                DenyEnabled = denyPanel.ListEnabled,
+                DenyBlock = denyPanel.Block,
+                Denied = denyPanel.Names
+            };
+            var snapshot = appSettings;
+            SaveSettings(delegate { Settings.SaveAppControl(snapshot); });
+            UpdateStatusBar();
+        }
+
+        // ---------- Автозапуск и права ----------
+
         void OnAutostartChanged(object sender, EventArgs e)
         {
             if (updating)
@@ -499,6 +679,8 @@ namespace ServiceWatchdog
             }
         }
 
+        // ---------- Журнал и строка состояния ----------
+
         void PollLog()
         {
             foreach (var entry in logTail.ReadNew())
@@ -523,8 +705,9 @@ namespace ServiceWatchdog
 
         void UpdateStatusBar()
         {
-            statusLabel.Text = "Отслеживается служб: " + watched.Count
-                + "   •   перезапуск, если служба не работает " + timeoutSeconds + " с";
+            statusLabel.Text = "Служб: " + watched.Count + ", таймаут " + timeoutSeconds + " с"
+                + "   •   разрешённые: " + DescribeMode(appSettings.Enabled, appSettings.Block)
+                + "   •   запрещённые: " + DescribeMode(appSettings.DenyEnabled, appSettings.DenyBlock);
 
             bool running = MonitorHost.IsRunning();
             if (running)
@@ -534,6 +717,11 @@ namespace ServiceWatchdog
             else
                 monitorLabel.Text = "Мониторинг не запущен — нужна настройка администратором";
             monitorLabel.ForeColor = running ? Color.DarkGreen : Color.Firebrick;
+        }
+
+        static string DescribeMode(bool enabled, bool block)
+        {
+            return !enabled ? "выкл." : block ? "завершение" : "журнал";
         }
 
         static bool Contains(string text, string part)

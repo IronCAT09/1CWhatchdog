@@ -1,6 +1,6 @@
 using System.ServiceProcess;
 
-namespace ServiceWatchdog
+namespace OneCWhatchdog
 {
     static class Texts
     {

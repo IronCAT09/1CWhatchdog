@@ -5,7 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 
-namespace ServiceWatchdog
+namespace OneCWhatchdog
 {
     /// <summary>
     /// Строка журнала: «yyyy-MM-dd HH:mm:ss ! текст», где «!» — событие,

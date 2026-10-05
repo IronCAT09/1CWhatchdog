@@ -5,19 +5,20 @@ using System.Security.Principal;
 using System.Threading;
 using System.Windows.Forms;
 
-namespace ServiceWatchdog
+namespace OneCWhatchdog
 {
     static class Program
     {
-        public const string AppName = "ServiceWatchdog";
-        public const string ShowEventName = "Local\\ServiceWatchdog_Show";
-        const string MutexName = "Local\\ServiceWatchdog_SingleInstance";
-        const string SettingsMutexName = "Local\\ServiceWatchdog_SettingsInstance";
-        const string SettingsEventName = "Local\\ServiceWatchdog_ActivateSettings";
+        public const string AppName = "1CWhatchdog";
+        public const string ShowEventName = "Local\\1CWhatchdog_Show";
+        const string MutexName = "Local\\1CWhatchdog_SingleInstance";
+        const string SettingsMutexName = "Local\\1CWhatchdog_SettingsInstance";
+        const string SettingsEventName = "Local\\1CWhatchdog_ActivateSettings";
 
         /// <summary>
         /// Режимы запуска:
-        ///   (без аргументов) — значок в трее в сеансе пользователя;
+        ///   (без аргументов) — значок в трее и сразу открытое окно (запуск пользователем);
+        ///   /tray            — только значок в трее (автозапуск при входе в Windows);
         ///   /monitor         — фоновый мониторинг (задание Планировщика от имени SYSTEM);
         ///   /settings        — окно настроек с правами администратора.
         /// </summary>
@@ -40,6 +41,7 @@ namespace ServiceWatchdog
                 return;
             }
 
+            bool trayOnly = mode == "/tray";
             Mutex mutex;
             bool createdNew;
             try
@@ -49,7 +51,8 @@ namespace ServiceWatchdog
             catch (UnauthorizedAccessException)
             {
                 // Мьютекс создан экземпляром, запущенным с правами администратора.
-                ShowRunningInstance();
+                if (!trayOnly)
+                    ShowRunningInstance();
                 return;
             }
 
@@ -57,10 +60,12 @@ namespace ServiceWatchdog
             {
                 if (!createdNew)
                 {
-                    ShowRunningInstance();
+                    // Автозапуск при уже работающем значке ничего не показывает.
+                    if (!trayOnly)
+                        ShowRunningInstance();
                     return;
                 }
-                Application.Run(new TrayContext());
+                Application.Run(new TrayContext(!trayOnly));
             }
         }
 

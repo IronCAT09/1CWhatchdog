@@ -6,10 +6,10 @@ using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
 
-namespace ServiceWatchdog
+namespace OneCWhatchdog
 {
     /// <summary>
-    /// Настройки и журнал в C:\ProgramData\ServiceWatchdog. Изменять их могут только
+    /// Настройки и журнал в C:\ProgramData\1CWhatchdog. Изменять их могут только
     /// администраторы и SYSTEM, остальные пользователи — только читать.
     /// </summary>
     static class Settings
@@ -21,12 +21,18 @@ namespace ServiceWatchdog
         public static readonly string LogPath = Path.Combine(Dir, "watchdog.log");
         static readonly string ServicesPath = Path.Combine(Dir, "services.txt");
         static readonly string TimeoutPath = Path.Combine(Dir, "timeout.txt");
+        static readonly string AllowedPath = Path.Combine(Dir, "allowed.txt");
+        static readonly string DeniedPath = Path.Combine(Dir, "denied.txt");
+        static readonly string AppControlPath = Path.Combine(Dir, "appcontrol.txt");
+        /// <summary>Папка настроек версий до переименования (ServiceWatchdog 1.0–1.1).</summary>
+        static readonly string LegacyDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "ServiceWatchdog");
         static readonly object logSync = new object();
 
         /// <summary>
-        /// Создаёт папку и закрывает её на запись для обычных пользователей: список служб
-        /// исполняет мониторинг с правами SYSTEM. По умолчанию в подпапках ProgramData
-        /// пользователи могут создавать файлы.
+        /// Создаёт папку и закрывает её на запись для обычных пользователей: списки служб и
+        /// разрешённых программ исполняет мониторинг с правами SYSTEM. По умолчанию в подпапках
+        /// ProgramData пользователи могут создавать файлы.
         /// </summary>
         public static void EnsureDirectory()
         {
@@ -47,10 +53,25 @@ namespace ServiceWatchdog
             Directory.SetAccessControl(Dir, security);
         }
 
+        /// <summary>Переносит список служб и таймаут из папки ServiceWatchdog, если своих ещё нет.</summary>
+        public static void MigrateLegacy()
+        {
+            if (!Directory.Exists(LegacyDir))
+                return;
+            EnsureDirectory();
+            foreach (var target in new[] { ServicesPath, TimeoutPath })
+            {
+                string source = Path.Combine(LegacyDir, Path.GetFileName(target));
+                if (File.Exists(source) && !File.Exists(target))
+                    File.Copy(source, target);
+            }
+        }
+
         /// <summary>Отпечаток файлов настроек — по нему видно, что их изменили.</summary>
         public static string GetStamp()
         {
-            return Stamp(ServicesPath) + "|" + Stamp(TimeoutPath);
+            return string.Join("|", new[] { ServicesPath, TimeoutPath, AllowedPath, DeniedPath, AppControlPath }
+                .Select(p => Stamp(p).ToString()).ToArray());
         }
 
         static long Stamp(string path)
@@ -66,24 +87,12 @@ namespace ServiceWatchdog
 
         public static List<string> LoadServices()
         {
-            if (!File.Exists(ServicesPath))
-                return new List<string>();
-            return File.ReadAllLines(ServicesPath, Encoding.UTF8)
-                .Select(l => l.Trim())
-                .Where(l => l.Length > 0)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
+            return ReadList(ServicesPath);
         }
 
         public static void SaveServices(IEnumerable<string> services)
         {
-            EnsureDirectory();
-            string tmp = ServicesPath + ".tmp";
-            File.WriteAllLines(tmp, services.OrderBy(s => s, StringComparer.OrdinalIgnoreCase), Encoding.UTF8);
-            if (File.Exists(ServicesPath))
-                File.Replace(tmp, ServicesPath, null);
-            else
-                File.Move(tmp, ServicesPath);
+            WriteList(ServicesPath, services);
         }
 
         public static int LoadTimeout()
@@ -98,6 +107,71 @@ namespace ServiceWatchdog
         {
             EnsureDirectory();
             File.WriteAllText(TimeoutPath, seconds.ToString());
+        }
+
+        public static AppControlSettings LoadAppControl()
+        {
+            var settings = new AppControlSettings { Allowed = ReadList(AllowedPath), Denied = ReadList(DeniedPath) };
+            if (File.Exists(AppControlPath))
+            {
+                foreach (var line in File.ReadAllLines(AppControlPath, Encoding.UTF8))
+                {
+                    int eq = line.IndexOf('=');
+                    if (eq <= 0)
+                        continue;
+                    string key = line.Substring(0, eq).Trim().ToLowerInvariant();
+                    bool value = line.Substring(eq + 1).Trim() == "1";
+                    if (key == "enabled")
+                        settings.Enabled = value;
+                    else if (key == "block")
+                        settings.Block = value;
+                    else if (key == "deny_enabled")
+                        settings.DenyEnabled = value;
+                    else if (key == "deny_block")
+                        settings.DenyBlock = value;
+                }
+            }
+            return settings;
+        }
+
+        public static void SaveAppControl(AppControlSettings settings)
+        {
+            WriteList(AllowedPath, settings.Allowed);
+            WriteList(DeniedPath, settings.Denied);
+            WriteText(AppControlPath,
+                "enabled=" + (settings.Enabled ? "1" : "0") + Environment.NewLine
+                + "block=" + (settings.Block ? "1" : "0") + Environment.NewLine
+                + "deny_enabled=" + (settings.DenyEnabled ? "1" : "0") + Environment.NewLine
+                + "deny_block=" + (settings.DenyBlock ? "1" : "0") + Environment.NewLine);
+        }
+
+        static List<string> ReadList(string path)
+        {
+            if (!File.Exists(path))
+                return new List<string>();
+            return File.ReadAllLines(path, Encoding.UTF8)
+                .Select(l => l.Trim())
+                .Where(l => l.Length > 0)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        static void WriteList(string path, IEnumerable<string> items)
+        {
+            WriteText(path, string.Join(Environment.NewLine,
+                items.OrderBy(s => s, StringComparer.OrdinalIgnoreCase).ToArray()) + Environment.NewLine);
+        }
+
+        /// <summary>Запись через временный файл, чтобы мониторинг не прочитал файл наполовину.</summary>
+        static void WriteText(string path, string text)
+        {
+            EnsureDirectory();
+            string tmp = path + ".tmp";
+            File.WriteAllText(tmp, text, Encoding.UTF8);
+            if (File.Exists(path))
+                File.Replace(tmp, path, null);
+            else
+                File.Move(tmp, path);
         }
 
         public static void AppendLog(LogEntry entry)
